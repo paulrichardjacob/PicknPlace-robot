@@ -35,7 +35,7 @@ def main():
     # Call the RRT planner
     path = pp.rrt(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn)
 
-    # Visualize the path if found
+    # Visualize the path if found and 
     if path is not None:
         print("Path found!")
         for conf in path:
