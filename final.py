@@ -2,6 +2,8 @@ import pybullet as p
 import pybullet_data
 import pybullet_planning as pp
 import numpy as np
+import burg_toolkit as burg
+import time
 
 def main():
     # Initialize Pybullet physics simulation
@@ -13,38 +15,33 @@ def main():
     # Load Panda robot
     robot = p.loadURDF("franka_panda/panda.urdf", [0, 0, 0], useFixedBase=True)
 
-    joints = [j for j in pp.get_joints(robot) if pp.has_joint_limits(j)] # get the robot joints
-    end_effector_link = pp.get_link_info(robot, 7)
+    def set_initial_pose(robot, desired_pose):
+        # Convert the pose to a position and a quaternion
+        initial_position, initial_quaternion = burg.util.position_and_quaternion_from_tf(desired_pose,
+                                                                                         convention='pybullet')
 
-    # Set the start conf to be the current configuration
-    start_conf = pp.get_joint_positions(robot, joints)
+        # Calculate the joint positions needed to set the end effector to the initial pose
+        initial_joint_positions = p.calculateInverseKinematics(robot, 11, initial_position, initial_quaternion)
+        initial_joint_positions = np.array(initial_joint_positions[:9])  # Ignore last 2 values for gripper
 
-    # Set the end conf to be the desired target position
-    # NOTE: In a real scenario, you would calculate the joint angles that would result in the desired end effector pose using inverse kinematics.
-    end_conf = start_conf.copy()
-    end_conf[2] += np.pi / 2  # Change one of the joint positions as an example
+        # Set the joint positions
+        for i in range(9):  # There are 9 joints for the robot arm and gripper
+            p.resetJointState(robot, i, initial_joint_positions[i])
 
-    obstacles = [] # this can be populated with obstacle geometries if needed
+        p.stepSimulation()  # Update the simulation
+        time.sleep(5)  # Sleep to make sure simulation updates
 
-    # Define the relevant functions for the motion planner
-    sample_fn = pp.get_sample_fn(robot, joints)
-    extend_fn = pp.get_extend_fn(robot, joints)
-    distance_fn = pp.get_distance_fn(robot, joints)
-    collision_fn = pp.get_collision_fn(robot, joints, obstacles=obstacles, attachments=[])
-
-    # Call the RRT planner
-    path = pp.rrt(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn)
-
-    # Visualize the path if found and 
-    if path is not None:
-        print("Path found!")
-        for conf in path:
-            pp.set_joint_positions(robot, joints, conf)
-            p.stepSimulation()
-    else:
-        print("No path found.")
+    # Set an initial pose for the robot
+    desired_pose = np.array([
+        [-1.0, 0.0, 0.0, 0.2],
+        [0.0, 1.0, 0.0, 0.3],
+        [0.0, 0.0, -1.0, 0.5],
+        [0.0, 0.0, 0.0, 1.0]
+    ])
+    set_initial_pose(robot, desired_pose)
 
     p.disconnect()  # disconnect from the PyBullet simulator
+
 
 if __name__ == "__main__":
     main()
