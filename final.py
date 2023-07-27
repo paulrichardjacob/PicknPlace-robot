@@ -4,128 +4,83 @@ import pybullet_planning as pp
 import numpy as np
 import burg_toolkit as burg
 import time
+from pybullet_planning.interfaces.robots.collision import get_collision_fn
+
+def pose_to_joint_conf(robot, end_effector_link, desired_pose):
+    """ Converts the desired pose to joint configuration using inverse kinematics """
+    position, orientation = burg.util.position_and_quaternion_from_tf(desired_pose, convention='pybullet')
+    joint_positions = p.calculateInverseKinematics(robot, end_effector_link, position, orientation)
+    joint_positions = list(joint_positions)[:7]
+    return joint_positions
+
+def move_robot(robot, start_conf, target_pose, collision_fn):
+    joint_positions = np.array(start_conf)
+    target_position, target_quaternion = burg.util.position_and_quaternion_from_tf(target_pose, convention='pybullet')
+    target_joint_positions = p.calculateInverseKinematics(robot, 11, target_position, target_quaternion)
+    target_joint_positions = np.array(target_joint_positions[:7])
+
+    num_waypoints = 20
+    waypoints = np.linspace(joint_positions,target_joint_positions, num=num_waypoints)
+    print("Calculated waypoints:", waypoints)
+
+    all_joint_positions = p.getJointStates(robot, [i for i in range(p.getNumJoints(robot))])
+    all_joint_positions = [conf[0] for conf in all_joint_positions]
+
+    for waypoint in waypoints:
+        all_joint_positions[:7] = waypoint  # Update the positions of revolute joints
+        if collision_fn(waypoint,diagnosis=True):  # Check collision for all joints
+            print("Collision detected! Stopping motion.")
+            return False
+
+        for i, joint_position in enumerate(waypoint):
+            print("Before resetting joint position:", p.getJointState(robot, i))
+            p.resetJointState(robot, i, joint_position)
+            print("After resetting joint position:", p.getJointState(robot, i))
+
+        print("Moving to waypoint:", waypoint)
+        time.sleep(0.1)
+
+    return True
+
 
 def main():
-    # Initialize Pybullet physics simulation
     physicsClient = p.connect(p.GUI)
-    p.setAdditionalSearchPath(pybullet_data.getDataPath())  # Add search path for PyBullet data
-    p.setGravity(0, 0, -10)  # Set gravity in the simulation
-    p.loadURDF("plane.urdf", [0, 0, 0])  # Load ground plane
+    p.setAdditionalSearchPath(pybullet_data.getDataPath())
+    p.setGravity(0, 0, -10)
+    p.loadURDF("plane.urdf", [0, 0, 0])
 
-    # Load Panda robot
-    robot = p.loadURDF("franka_panda/panda.urdf", [0, 0, 0], useFixedBase=True)
-    robot_joints = [i for i in range(p.getNumJoints(robot))]
-    joint_limits = []
-    num_joints = p.getNumJoints(robot)
+    robot = p.loadURDF("franka_panda/panda.urdf", [0, 0, 0.5], useFixedBase=True)
 
-    for i in range(num_joints):
-        info = p.getJointInfo(robot, i)
-        joint_limits.append((info[8], info[9]))  # lower and upper limit for each joint
+    all_joints = [i for i in range(p.getNumJoints(robot))]  # Get all joints
+    print("All joints:", all_joints)
 
-    joint_limits = np.array(joint_limits)  # Convert to numpy array for convenience
-    print(joint_limits)
+    revolute_joints = [i for i in range(p.getNumJoints(robot)) if p.getJointInfo(robot, i)[2] == p.JOINT_REVOLUTE]
+    print("Revolute joints:", revolute_joints)
 
-    # Define the euclidean distance function
-    def get_delta(q1, q2):
-        return np.array(q2) - np.array(q1)
+    start_conf = p.getJointStates(robot, revolute_joints)
+    start_conf = [conf[0] for conf in start_conf]
+    print("Start configuration:", start_conf)
 
-    def get_euclidean_distance_fn(weights):
-        difference_fn = get_delta
+    collision_fn = get_collision_fn(robot, revolute_joints, obstacles=[], self_collisions=False)  # Check collision for all joints
 
-        def distance_fn(q1, q2):
-            diff = np.array(difference_fn(q2, q1))
-            return np.sqrt(np.dot(weights, diff * diff))
-
-        return distance_fn
-
-    def sample_fn():
-        q = np.zeros(num_joints)
-        for i in range(num_joints):
-            lower_limit, upper_limit = joint_limits[i]
-            if np.isinf(lower_limit) or np.isinf(upper_limit):  # It's a continuous joint
-                q[i] = np.random.uniform(-np.pi, np.pi)  # Sample from -pi to pi
-            elif lower_limit == upper_limit:  # It's a fixed joint
-                q[i] = lower_limit  # Or upper_limit, they're the same
-            else:  # Regular joint
-                q[i] = np.random.uniform(lower_limit, upper_limit)
-        return q
-
-    # Getting collision function
-    collision_fn = pp.get_collision_fn(robot, robot_joints, obstacles=[],
-                                       attachments=[], self_collisions=True,
-                                       disabled_collisions=set())
-
-    def extend_fn(start_conf, end_conf):
-        num_steps = 100  # The number of intermediate steps between start_conf and end_conf
-        for i in range(num_steps):
-            t = float(i) / (num_steps - 1)  # The fraction of the way from start_conf to end_conf
-            interpolated_conf = (1 - t) * np.array(start_conf) + t * np.array(end_conf)
-            # Now you need to compute the IK solution to check if this configuration is possible
-            joint_positions = p.calculateInverseKinematics(robot, end_effector_link, interpolated_conf[:3], interpolated_conf[3:])
-            # Validate if this position is in collision
-            if not collision_fn(joint_positions):
-                yield joint_positions
-
-    distance_fn = get_euclidean_distance_fn(weights=np.ones(num_joints))
-
-    def pose_to_joint_conf(robot, end_effector_link, desired_pose):
-        # Extract position and orientation from pose
-        position, orientation = burg.util.position_and_quaternion_from_tf(desired_pose, convention='pybullet')
-
-        # Calculate the joint configuration needed to set the end effector to the desired pose
-        joint_positions = p.calculateInverseKinematics(robot, end_effector_link, position, orientation)
-        joint_positions = list(joint_positions)
-        return joint_positions
-
-    def set_initial_pose(robot, desired_pose):
-        # Convert the pose to a position and a quaternion
-        initial_position, initial_quaternion = burg.util.position_and_quaternion_from_tf(desired_pose,
-                                                                                         convention='pybullet')
-
-        #Calculate the joint positions needed to set the end effector to the initial pose
-        initial_joint_positions = p.calculateInverseKinematics(robot, end_effector_link, initial_position, initial_quaternion)
-        initial_joint_positions = np.array(initial_joint_positions)
-         #Set the joint positions
-        for i in range(end_effector_link):  # There are 9 joints for the robot arm and gripper
-            p.resetJointState(robot, i, initial_joint_positions[i])
-
-        p.stepSimulation()  # Update the simulation
-        time.sleep(5)  # Sleep to make sure simulation updates
-
-    # Set an initial pose for the robot
-    desired_pose = np.array([
-        [-1.0, 0.0, 0.0, -0.6],
-        [0.0, 1.0, 0.0, 0.2],
-        [0.0, 0.0, -1.0, 0.5],
-        [0.0, 0.0, 0.0, 1.0]
-    ])
-    #set_initial_pose(robot, desired_pose)
-
-    # Convert the desired pose to a joint configuration
-    end_effector_link = 12
-    start_conf = pose_to_joint_conf(robot, end_effector_link, desired_pose)
-    print("Desired configuration:", start_conf)
-
-    # Define a goal pose for the robot
     goal_pose = np.array([
-        [-1.0, 0.0, 0.0, 0.5],
+        [-1.0, 0.0, 0.0, 0.3],
         [0.0, 1.0, 0.0, 0.4],
-        [0.0, 0.0, -1.0, 0.6],
+        [0.0, 0.0, -1.0, 0.8],
         [0.0, 0.0, 0.0, 1.0]
     ])
 
-    # Convert the goal pose to a joint configuration
+    end_effector_link = 11
     end_conf = pose_to_joint_conf(robot, end_effector_link, goal_pose)
     print("Goal configuration:", end_conf)
-    max_time = 20
-    path = pp.birrt(start_conf, end_conf, distance_fn, sample_fn, extend_fn, collision_fn,
-                  max_time=max_time)
-    print(path)
-    print("Is initial configuration in collision? ", collision_fn(start_conf))
-    print("Is goal configuration in collision? ", collision_fn(end_conf))
 
-    p.disconnect()  # disconnect from the PyBullet simulator
+    successful = move_robot(robot, start_conf, goal_pose, collision_fn)
+    if successful:
+        print("Reached goal configuration without collisions.")
+    else:
+        print("Could not reach goal configuration due to collisions.")
 
+    p.disconnect()
 
 if __name__ == "__main__":
     main()

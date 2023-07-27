@@ -6,9 +6,6 @@ import burg_toolkit as burg
 import time
 from pybullet_planning.interfaces.robots.collision import get_collision_fn
 
-def get_movable_joints(robot):
-    """ Returns the indices of movable joints of a robot """
-    return [i for i in range(p.getNumJoints(robot)) if p.getJointInfo(robot, i)[2] != p.JOINT_FIXED]
 
 def pose_to_joint_conf(robot, end_effector_link, desired_pose):
     """ Converts the desired pose to joint configuration using inverse kinematics """
