@@ -65,13 +65,12 @@ collision_fn = get_collision_fn(robot, revolute_joints, obstacles=obstacles,
                                     disabled_collisions=panda_self_collision_disabled_link_indices)
 smooth = True
 num_restarts = 0
-max_time = 2
+max_time = 10
 
 
 def matrix_to_robot_config(robot, end_effector_link, matrix):
     # Convert 4x4 matrix to position and orientation using the burg toolkit
     position, orientation = burg.util.position_and_quaternion_from_tf(matrix, convention='pybullet')
-
     # Calculate the inverse kinematics to get joint configuration for the given pose
     joint_positions = p.calculateInverseKinematics(robot, end_effector_link, position, orientation)
     joint_positions = list(joint_positions)[:7]  # Assuming Franka Panda's 7 joints
@@ -96,9 +95,9 @@ distance_fn = get_euclidean_distance_fn(weights=weights)
 
 
 goal_pose = np.array([
-    [-1.0, 0.0, 0.0, 1.0],
-    [0.0, 1.0, 0.0, 1.0],
-    [0.0, 0.0, -1.0, 0.7],
+    [-1.0, 0.0, 0.0, 0.5],
+    [0.0, 1.0, 0.0, 0.4],
+    [0.0, 0.0, -1.0, 0.2],
     [0.0, 0.0, 0.0, 1.0]
 ])
 end_effector_link=11
@@ -109,12 +108,109 @@ goal_joint_config = matrix_to_robot_config(robot, end_effector_link, goal_pose)
 distance = distance_fn(desired_joint_angles, goal_joint_config)
 print("Distance between configurations:", distance)
 
+# 2. Define the sample function
+def sample_joint_config(joint_limits):
+    return [np.random.uniform(low, high) for (low, high) in joint_limits]
 
 
-path = pp.birrt(start=desired_joint_angles, goal= goal_pose, distance_fn=distance_fn, sample_fn=sample_fn,
-                             extend_fn=extend_fn, collision_fn=collision_fn,
-                             max_time=max_time, smooth=100)
+# Example: Get a random joint configuration
+random_config = sample_joint_config(joint_limits)
+print(random_config)
+
+def interpolate_config(q1, q2, fraction):
+    """Linearly interpolate between two configurations."""
+    return [(1 - fraction) * q1_i + fraction * q2_i for q1_i, q2_i in zip(q1, q2)]
+
+def interpolate_pose(pose1, pose2, fraction):
+    """Linearly interpolate between two poses."""
+    pos1, orn1 = pose1
+    pos2, orn2 = pose2
+    interp_position = [(1 - fraction) * p1 + fraction * p2 for p1, p2 in zip(pos1, pos2)]
+    interp_orientation = p.getQuaternionSlerp(orn1, orn2, fraction)
+    return (interp_position, interp_orientation)
 
 
+'''
+def robot_extend_fn_task_space(q1, q2, step_size=0.05):
+    """Generate a sequence of configurations by interpolating in task space."""
+    path = [q1]
+
+    # Get initial and goal end-effector poses
+    pose1 = p.getLinkState(robot, end_effector_link, computeForwardKinematics=True)[:2]
+    pose2 = p.getLinkState(robot, end_effector_link, targetPositions=q2, computeForwardKinematics=True)[:2]
+
+    t = step_size
+    while t < 1.0:
+        # Interpolate in task-space
+        intermediate_pose = interpolate_pose(pose1, pose2, t)
+        # Find the corresponding configuration using IK
+        intermediate_config = p.calculateInverseKinematics(robot, end_effector_link, intermediate_pose[0],
+                                                           intermediate_pose[1])
+        intermediate_config = list(intermediate_config)[:7]  # Assuming Franka Panda's 7 joints
+
+        if collision_fn(intermediate_config):
+            print("Collision detected at configuration:", intermediate_config)
+            return []
+
+        path.append(intermediate_config)
+        t += step_size
+
+    path.append(q2)
+
+    print("Generated path:", path)
+    return path
+'''
+def robot_extend_fn_task_space(q1, q2, step_size=0.05):
+    """Generate a sequence of configurations by interpolating in task space."""
+    path = [q1]
+
+    # Get initial end-effector pose
+    pose1 = p.getLinkState(robot, end_effector_link, computeForwardKinematics=True)[:2]
+
+    # Temporarily set joint positions to q2
+    original_positions = p.getJointStates(robot, revolute_joints)
+    original_positions = [joint_info[0] for joint_info in original_positions]
+    p.setJointMotorControlArray(bodyUniqueId=robot, jointIndices=revolute_joints,
+                                controlMode=p.POSITION_CONTROL, targetPositions=q2)
+    p.stepSimulation()  # update simulation to reflect joint position change
+
+    # Get the end-effector pose corresponding to q2
+    pose2 = p.getLinkState(robot, end_effector_link, computeForwardKinematics=True)[:2]
+
+    # Revert joint positions to original configuration
+    p.setJointMotorControlArray(bodyUniqueId=robot, jointIndices=revolute_joints,
+                                controlMode=p.POSITION_CONTROL, targetPositions=original_positions)
+
+    t = step_size
+    while t < 1.0:
+        # Interpolate in task-space
+        intermediate_pose = interpolate_pose(pose1, pose2, t)
+        # Find the corresponding configuration using IK
+        intermediate_config = p.calculateInverseKinematics(robot, end_effector_link, intermediate_pose[0],
+                                                           intermediate_pose[1])
+        intermediate_config = list(intermediate_config)[:7]  # Assuming Franka Panda's 7 joints
+
+        if collision_fn(intermediate_config):
+            print("Collision detected at configuration:", intermediate_config)
+            return []
+
+        path.append(intermediate_config)
+        t += step_size
+
+    path.append(q2)
+
+    print("Generated path:", path)
+    return path
+
+
+path = pp.prm(start=desired_joint_angles, goal=goal_joint_config, distance_fn=distance_fn, sample_fn=lambda: sample_joint_config(joint_limits),
+                             extend_fn=robot_extend_fn_task_space, collision_fn=collision_fn,
+                           num_samples=100)
+
+#paths = [] if path is None else [path]
+print('Solutions ({}): {} | Time: {:.3f}'.format(len(path), [(len(path), round(compute_path_cost(
+    path, distance_fn), 3)) for path in path], pp.elapsed_time(start_time)))
+
+#print(path)
 while True:
     p.stepSimulation()
